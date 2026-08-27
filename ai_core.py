@@ -11,14 +11,50 @@ import sys
 import re
 import json
 import math
+import ssl
 import time
 import threading
 import urllib.request
 
+try:
+    import certifi
+except Exception:
+    # Desktop/minimal environments may not have certifi installed.  In that
+    # case the request path below falls back to the platform SSL store.
+    certifi = None
+
 # --------------------------------------------------------------------------- #
-# 路径：手机端（Kivy/Android）~/ 指向 app 私有可写目录；桌面测试时指向用户目录
+# 路径：Android 使用 python-for-android 提供的 app 私有目录；桌面测试时指向用户目录
 # --------------------------------------------------------------------------- #
-APP_DIR = os.path.join(os.path.expanduser("~"), ".tavern_pet")
+
+
+def _default_app_dir():
+    """Return a writable per-app directory on Android, with a desktop fallback.
+
+    Android does not guarantee that ``expanduser("~")`` is writable.  On the
+    MuMu device it resolves to ``/data``, which caused the first screen to
+    crash when HistoryManager tried to create ``/data/.tavern_pet``.
+    """
+    try:
+        from android.storage import app_storage_path
+
+        base_dir = app_storage_path()
+        if base_dir:
+            return os.path.join(base_dir, ".tavern_pet")
+    except Exception:
+        # The android module is unavailable during desktop development/tests,
+        # and older python-for-android versions may not expose this helper.
+        pass
+
+    # python-for-android exposes this path in the environment as a fallback.
+    base_dir = os.environ.get("ANDROID_APP_PATH")
+    if base_dir:
+        return os.path.join(base_dir, ".tavern_pet")
+
+    return os.path.join(os.path.expanduser("~"), ".tavern_pet")
+
+
+APP_DIR = _default_app_dir()
 HISTORY_DIR = os.path.join(APP_DIR, "history")
 WORLDBOOK_DIR = os.path.join(APP_DIR, "worldbooks")
 SUMMARY_FILE = os.path.join(HISTORY_DIR, "summaries.json")
@@ -644,11 +680,34 @@ def search_history(query, top_k=5):
 # --------------------------------------------------------------------------- #
 # API 流式调用（OpenAI 兼容，标准库 urllib）
 # --------------------------------------------------------------------------- #
+def _ssl_context():
+    """Build a verifying context that works with Android's bundled Python.
+
+    Android's system CA store is not consistently visible to the OpenSSL
+    runtime shipped inside python-for-android.  certifi supplies a portable
+    Mozilla CA bundle, while the default context remains the fallback for
+    desktop and platform-managed environments.
+    """
+    if certifi is not None:
+        try:
+            cafile = certifi.where()
+            if cafile and os.path.isfile(cafile):
+                return ssl.create_default_context(cafile=cafile)
+        except Exception as e:
+            print('内置 CA 证书加载失败，回退到系统证书:', e)
+    try:
+        return ssl.create_default_context()
+    except Exception as e:
+        print('系统 CA 证书加载失败，使用 urllib 默认校验:', e)
+        return None
+
+
 def _stream_once(messages, cfg, tools, on_token=None, on_reasoning=None):
     base = (cfg.get("base_url") or "").rstrip("/")
     url = base + "/chat/completions"
+    model_name = str(cfg.get("model") or "gpt-3.5-turbo").strip()
     payload = {
-        "model": cfg.get("model") or "gpt-3.5-turbo",
+        "model": model_name,
         "messages": messages,
         "stream": True,
         "temperature": float(cfg.get("temperature", 0.8)),
@@ -658,6 +717,8 @@ def _stream_once(messages, cfg, tools, on_token=None, on_reasoning=None):
     if tools:
         payload["tools"] = tools
         payload["tool_choice"] = "auto"
+        if model_name.lower() == "gpt-5.6-luna":
+            payload["reasoning_effort"] = "none"
     if cfg.get("model_source") != "local":
         payload["stream_options"] = {"include_usage": True}
     data = json.dumps(payload).encode("utf-8")
@@ -669,7 +730,12 @@ def _stream_once(messages, cfg, tools, on_token=None, on_reasoning=None):
     req.add_header("Authorization", "Bearer " + api_key)
     tool_calls = []
     last_usage = None
-    with urllib.request.urlopen(req, timeout=120) as resp:
+    context = _ssl_context()
+    if context is None:
+        response = urllib.request.urlopen(req, timeout=120)
+    else:
+        response = urllib.request.urlopen(req, timeout=120, context=context)
+    with response as resp:
         for raw in resp:
             line = raw.decode("utf-8", errors="replace").strip()
             if not line or not line.startswith("data:"):
