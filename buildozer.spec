@@ -1,47 +1,51 @@
 [app]
 
-# 应用基本信息
+# 应用名（手机桌面显示的名字）
 title = 酒馆
+
+# buildozer 必需字段（否则启动校验直接拒绝）
 version = 0.1.0
+
+# 包名（唯一标识，装过就不能随便改）
 package.name = tavernpet
 package.domain = org.example
 
-# main.py 位于仓库根目录。只把应用运行时需要的文件放进 APK。
+# 源文件入口
 source.dir = .
-source.include_exts = py,png,jpg,jpeg,kv,atlas,ttf,txt,json
-source.exclude_dirs = tests,bin,.git,.github,.buildozer,venv,.venv
+source.include_exts = py,png,jpg,kv,atlas,ttf,otf,txt,json
+source.exclude_dirs = tests, bin, .git, .github, .buildozer
 
-# ai_core.py 只使用标准库；Kivy 是唯一的 UI 框架依赖。
-# distro 和 charset_normalizer 是运行时普通 Python 包，需显式列出。
-# Python 版本必须 python3 和 hostpython3 一起钉，两者必须完全一致（p4a 强制检查）。
-# 用 3.12.14（p4a master 官方稳定支持到 3.12；3.14 是默认但 hostpython3 3.14 的 ensurepip 在旧组合下报 BuildDependencyInstallError，不可用）。
-# 必须写完整小版本号（3.12.14，不能只写 3.12）：p4a 拼下载地址 v{version}.tar.gz，只写 3.12 会 404 找不到 tag。
-# 配 NDK 28c（p4a 官方推荐版本；NDK 25 的 bionic 不声明 setgrent 导致 grpmodule 编译失败，升到 28c 解决）。
-requirements = python3==3.12.14,hostpython3==3.12.14,kivy,distro,charset_normalizer
+# certifi 将 Mozilla CA 根证书随 APK 打包，避免 Android 内置 Python
+# OpenSSL 找不到系统 CA；ai_core 仍会回退到平台证书库。
+requirements = python3,kivy,certifi==2026.7.22
 
-# Kivy 应用使用 SDL2。合法的 p4a bootstrap 只有 sdl2 / service_only / webview / qt 等；bootstrap 名不控制 Python 版本。
+# 固定到包含 Android wheel 安装修复的 p4a develop 提交，避免分支后续漂移。
+p4a.branch = develop
+p4a.commit = 9d5918bf752379f4520902524c15f794e45972b4
+p4a.local_recipes = ./p4a-recipes
+
+# Kivy Android 图形应用使用 SDL2 bootstrap。
 p4a.bootstrap = sdl2
 
-# 使用 p4a master 分支。配合上面的 Python recipe 版本可避免跟随默认版本漂移。
-p4a.branch = master
-
+# 竖屏（手机聊天应用）
 orientation = portrait
 
-# 手机直连 OpenAI 兼容 API / DeepSeek API。
-android.permissions = INTERNET
-
-# GitHub Actions 当前使用的 Android 工具链版本。
-android.api = 34
-android.minapi = 24
-android.ndk = 28c
-android.archs = arm64-v8a
-android.accept_sdk_license = True
-
-# 可选资源：文件存在后再取消注释。
+# 图标/横幅可放 icons/ 目录，缺省用 Kivy 默认
 # icon.filename = %(source.dir)s/icons/icon.png
 # presplash.filename = %(source.dir)s/icons/splash.png
 
-[buildozer]
+# 需要联网调 DeepSeek API
+android.permissions = INTERNET
+# 目标 API 34、最低 24（Android 7+）
+android.api = 34
+android.minapi = 24
+android.ndk = 25b
+android.archs = arm64-v8a
+android.accept_sdk_license = True
+# 打包为 debug 版（无需签名配置，适合自用）
+android.debug_artifact_name = tavernpet-debug
 
+[buildozer]
+# 日志级别
 log_level = 2
 warn_on_root = 1
