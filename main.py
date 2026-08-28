@@ -6,8 +6,10 @@ tavern-android / main.py —— 酒馆版手机端（Kivy）。
 """
 import os
 import re
-import threading
+import sys
 import time
+import traceback
+import threading
 
 from kivy.app import App
 from kivy.core.text import LabelBase
@@ -161,6 +163,103 @@ DIVIDER = (0.88, 0.86, 0.92, 1.0)
 SUCCESS = (0.14, 0.55, 0.38, 1.0)
 DANGER = (0.78, 0.20, 0.28, 1.0)
 Window.clearcolor = BG
+
+
+# --------------------------------------------------------------------------- #
+# 崩溃兜底：Android 无控制台，未捕获异常会直接闪退且不留痕。
+# 这里把异常写进磁盘文件，并弹窗提示，避免静默崩溃、便于定位。
+# --------------------------------------------------------------------------- #
+def _crash_log_path():
+    try:
+        base = os.path.dirname(os.path.abspath(__file__))
+    except Exception:
+        base = '.'
+    return os.path.join(base, 'crash.log')
+
+
+def _write_crash(typ, value, tb):
+    try:
+        with open(_crash_log_path(), 'a', encoding='utf-8') as f:
+            f.write('\n=== %s ===\n' % time.strftime('%Y-%m-%d %H:%M:%S'))
+            f.write(''.join(traceback.format_exception(typ, value, tb)))
+    except Exception:
+        pass
+
+
+def _guard(fn):
+    """装饰器：捕获方法内的未处理异常并弹窗，避免 Android 静默闪退。"""
+    def _wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as ex:
+            import traceback as _tb
+            show_error(fn.__name__, ''.join(_tb.format_exception_only(type(ex), ex))[:240])
+    return _wrapper
+
+
+
+
+
+def install_crash_handler():
+    """捕获未处理异常，写崩溃日志并尝试弹窗（不阻断程序）。"""
+    original = sys.excepthook
+
+    def hook(typ, value, tb):
+        msg = ''.join(traceback.format_exception(typ, value, tb))
+        try:
+            _write_crash(typ, value, tb)
+        except Exception:
+            pass
+        print(msg)
+        # 用可滚动弹窗展示完整 traceback，让用户能看懂/截图，而不是闪退
+        try:
+            from kivy.uix.scrollview import ScrollView
+            box = BoxLayout(orientation='vertical', padding=(dp(14), dp(12)),
+                            spacing=dp(8))
+            box.add_widget(_label('运行出错（已记录到 crash.log）',
+                                  color=DANGER, bold=True, font_size=sp(13),
+                                  size_hint_y=None, height=dp(28)))
+            sv = ScrollView(size_hint=(1, 1))
+            sv.add_widget(_label(msg, font_size=sp(10), color=TEXT_DARK))
+            box.add_widget(sv)
+            close = ModernButton(text='关闭', background_color=FIELD_BG,
+                                color=TEXT_DARK, font_size=sp(13))
+            pop = Popup(title='错误', title_font=_UI_FONT_NAME, content=box,
+                        size_hint=(0.92, 0.7))
+            close.bind(on_release=lambda *_: pop.dismiss())
+            box.add_widget(close)
+            pop.open()
+        except Exception:
+            pass
+        return None
+
+    sys.excepthook = hook
+    # Python 3.8+：子线程未捕获异常不走 sys.excepthook，必须单独接住，
+    # 否则 daemon 线程（如发送/生成所在的 Thread）崩溃会直接杀进程 → 闪退。
+    try:
+        threading.excepthook = lambda args: hook(
+            args.exc_type, args.exc_value, args.exc_traceback)
+    except Exception:
+        pass
+
+
+def show_error(title, text):
+    """主动弹出一个非致命错误提示（用于已知风险点的兜底）。"""
+    try:
+        from kivy.uix.popup import Popup
+        box = BoxLayout(orientation='vertical', padding=(dp(14), dp(12)),
+                        spacing=dp(8))
+        box.add_widget(_label(text, font_size=sp(12), color=DANGER))
+        close = ModernButton(text='关闭', background_color=FIELD_BG,
+                            color=TEXT_DARK, font_size=sp(13))
+        pop = Popup(title=title, title_font=_UI_FONT_NAME, content=box,
+                    size_hint=(0.9, 0.5))
+        close.bind(on_release=lambda *_: pop.dismiss())
+        box.add_widget(close)
+        pop.open()
+    except Exception:
+        pass
+
 
 
 def _shade(color, amount=0.08):
@@ -930,6 +1029,7 @@ class WorldbookScreen(Screen):
     def on_enter(self):
         self.refresh()
 
+    @_guard
     def refresh(self):
         self.list_box.clear_widgets()
         query = (self.search_input.text or '').strip().casefold() if hasattr(self, 'search_input') else ''
@@ -986,7 +1086,8 @@ class WorldbookScreen(Screen):
                                     size_hint_y=None, height=dp(42)))
             self.list_box.add_widget(empty)
 
-    def edit_entry(self, entry, wb=None):
+    @_guard
+    def edit_entry(self, entry,  wb=None):
         """新增或编辑条目（Popup 表单）。"""
         if wb is None:
             books = ai_core.load_worldbooks()
@@ -1053,22 +1154,26 @@ class WorldbookScreen(Screen):
                               font_size=sp(13))
 
         def on_save(_):
-            e['title'] = t_title.text.strip() or '未命名条目'
-            e['content'] = t_content.text
-            e['primary_keywords'] = [k.strip() for k in re.split(r'[,，\n]+', t_kw.text) if k.strip()] \
-                if t_kw.text.strip() else []
-            e['memo'] = t_memo.text.strip()
-            e['status'] = {v: k for k, v in status_labels.items()}.get(st_spin.text, 'green')
-            e['position'] = {v: k for k, v in position_labels.items()}.get(pos_spin.text, 'before_char')
             try:
-                e['order'] = int(t_order.text.strip())
-            except Exception:
-                e['order'] = 100
-            wb['entries'] = [x for x in wb.get('entries', []) if x is not entry]
-            wb['entries'].append(e)
-            ai_core.save_worldbook(wb)
-            content.dismiss()
-            self.refresh()
+                e['title'] = t_title.text.strip() or '未命名条目'
+                e['content'] = t_content.text
+                e['primary_keywords'] = [k.strip() for k in re.split(r'[,，\n]+', t_kw.text) if k.strip()] \
+                    if t_kw.text.strip() else []
+                e['memo'] = t_memo.text.strip()
+                e['status'] = {v: k for k, v in status_labels.items()}.get(st_spin.text, 'green')
+                e['position'] = {v: k for k, v in position_labels.items()}.get(pos_spin.text, 'before_char')
+                try:
+                    e['order'] = int(t_order.text.strip())
+                except Exception:
+                    e['order'] = 100
+                wb['entries'] = [x for x in wb.get('entries', []) if x is not entry]
+                wb['entries'].append(e)
+                ai_core.save_worldbook(wb)
+                content.dismiss()
+                self.refresh()
+            except Exception as ex:
+                import traceback as _tb
+                show_error('保存失败', ''.join(_tb.format_exception_only(type(ex), ex))[:240])
 
         ok.bind(on_release=on_save)
         cancel.bind(on_release=lambda *_: content.dismiss())
@@ -1078,6 +1183,7 @@ class WorldbookScreen(Screen):
         content.content = outer
         content.open()
 
+    @_guard
     def delete_entry(self, wb, entry):
         title = entry.get('title') or '未命名条目'
         pop = Popup(title='删除世界书条目', title_font=_UI_FONT_NAME,
@@ -1097,10 +1203,14 @@ class WorldbookScreen(Screen):
         cancel.bind(on_release=lambda *_: pop.dismiss())
 
         def do_delete(_):
-            wb['entries'] = [x for x in wb.get('entries', []) if x is not entry]
-            ai_core.save_worldbook(wb)
-            pop.dismiss()
-            self.refresh()
+            try:
+                wb['entries'] = [x for x in wb.get('entries', []) if x is not entry]
+                ai_core.save_worldbook(wb)
+                pop.dismiss()
+                self.refresh()
+            except Exception as ex:
+                import traceback as _tb
+                show_error('删除失败', ''.join(_tb.format_exception_only(type(ex), ex))[:240])
 
         confirm.bind(on_release=do_delete)
         actions.add_widget(cancel)
@@ -1317,4 +1427,5 @@ class PetApp(App):
 
 
 if __name__ == '__main__':
-    PetApp().run()
+    install_crash_handler()
+    PetApp().  run()
